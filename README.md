@@ -25,5 +25,6 @@ g++ -std=c++11 -pthread serwer.cpp -o radio
 
 SERWER
 ./radio 8080
+
 KLIENT
 python3 main.py
