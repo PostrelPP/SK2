@@ -24,16 +24,20 @@ BLACK = (0, 0, 0)
 
 def get_available_songs():
     available_songs = []
-    music_dir = "./music"
+    music_dir = "./music"  
     
     if not os.path.exists(music_dir):
         os.makedirs(music_dir)
         return available_songs
     
     files = os.listdir(music_dir)
+    print(f"Files in {music_dir}: {files}")
+    
     for file in files:
         if file.lower().endswith('.mp3'):
-            available_songs.append(file[:-4])
+            song_name = file[:-4]
+            available_songs.append(song_name)
+            print(f"Found MP3: {song_name}")
     return available_songs
 
 def connect_to_server(host, port):
@@ -73,7 +77,7 @@ def receive_queue_list(sock):
         sock.settimeout(1)
         while True:
             try:
-                data = sock.recv(128)
+                data = sock.recv(128) #на текстовые команды хватит
                 if data:
                     queue_data += data
                 else:
@@ -101,7 +105,7 @@ def receive_audio_stream(sock, stream, stop_event):
     sock.settimeout(0.5)
     while not stop_event.is_set():
         try:
-            data = sock.recv(4096 * 4)
+            data = sock.recv(4096 * 4) #16 Кб за раз
             if data:
                 try:
                     stream.write(data)
@@ -119,40 +123,58 @@ def convert_mp3_to_wav_stream(mp3_filename):
         
         wav_buffer = io.BytesIO()
         audio.export(wav_buffer, format="wav")
-        return wav_buffer.getvalue()
+        wav_data = wav_buffer.getvalue()
+        
+        print(f"Conversion successful, size: {len(wav_data)} bytes")
+        return wav_data
+        
     except Exception as e:
         print(f"Conversion error: {e}")
         return None
 
 def upload_song(song_name, sock):
-    print(f"Uploading: {song_name}")
+    print(f"=== UPLOAD START: {song_name} ===")
     
     mp3_filename = f"./music/{song_name}.mp3"
+    print(f"Looking for file: {mp3_filename}")
+    
     if not os.path.exists(mp3_filename):
-        print(f"File not found: {mp3_filename}")
+        print(f"ERROR: File not found: {mp3_filename}")
+        print(f"Current directory: {os.getcwd()}")
+        print(f"Files in ./music/: {os.listdir('./music') if os.path.exists('./music') else 'Directory not found'}")
         return False
     
     try:
-        wav_data = convert_mp3_to_wav_stream(mp3_filename)
+        wav_data = convert_mp3_to_wav_stream(mp3_filename) # Конвертируем MP3 в WAV
         if not wav_data:
+            print("ERROR: Failed to convert MP3 to WAV")
             return False
         
+        print(f"Sending filename: '{song_name}' (without .wav)")
         sock.send(song_name.encode())
-        time.sleep(0.5)
+        time.sleep(0.5)  
         
         chunk_size = 12000
+        total_chunks = (len(wav_data) + chunk_size - 1) // chunk_size
+        print(f"Sending {total_chunks} chunks of {chunk_size} bytes each")
+        
         for i in range(0, len(wav_data), chunk_size):
             chunk = wav_data[i:i + chunk_size]
-            sock.send(chunk)
+            bytes_sent = sock.send(chunk)
+            print(f"Sent chunk {i//chunk_size + 1}/{total_chunks}, size: {bytes_sent} bytes")
             time.sleep(0.001)
         
+        print("Sending 'koniec' marker")
         time.sleep(0.5)
         sock.send(b"koniec")
-        print(f"Song uploaded: {song_name}")
+        
+        print(f"=== UPLOAD COMPLETE: {song_name} ===")
         return True
         
     except Exception as e:
-        print(f"Upload error: {e}")
+        print(f"UPLOAD ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def create_button(screen, x, y, width, height, text, font, color=PRIMARY_COLOR, hover_color=SECONDARY_COLOR, disabled=False):
@@ -207,7 +229,8 @@ def refresh_playlist(cmd_socket):
         cmd_socket.send(b"lista")
         time.sleep(0.3)
         return receive_queue_list(cmd_socket)
-    except:
+    except Exception as e:
+        print(f"Error refreshing playlist: {e}")
         return []
 
 def main():
@@ -215,20 +238,19 @@ def main():
         with open("conf.txt", "r") as f:
             server_host = f.readline().strip()
             server_port = int(f.readline().strip())
-            print(f"Server: {server_host}:{server_port}")
-    except:
+            print(f"Server configuration: {server_host}:{server_port}")
+    except Exception as e:
         server_host = "127.0.0.1"
         server_port = 8080
 
     try:
         audio = pyaudio.PyAudio()
-        audio_stream = audio.open(format=pyaudio.paInt16,
-                                 channels=2,
-                                 rate=44100,
-                                 output=True,
-                                 frames_per_buffer=4096*4)
-        print("Audio initialized")
-    except:
+        audio_stream = audio.open(format=pyaudio.paInt16, channels=2,
+                                 rate=44100, output=True, frames_per_buffer=4096*4)
+        print("Audio initialized successfully")
+    except Exception as e:
+        print(f"Audio initialization error: {e}")
+        print("Audio playback will be disabled")
         audio = None
         audio_stream = None
 
@@ -263,13 +285,13 @@ def main():
     
     while is_running:
         clock.tick(30)
-        
+       
         current_time = time.time()
         if is_connected and cmd_socket and current_time - last_refresh_time > refresh_interval:
             new_playlist = refresh_playlist(cmd_socket)
             if new_playlist != playlist_queue:
-                playlist_queue = new_playlist
-                print(f"Playlist: {playlist_queue}")
+                playlist_queue = new_playlist #актуализация листа каждые 3 секунды
+                print(f"Playlist updated: {playlist_queue}")
             last_refresh_time = current_time
         
         for event in pygame.event.get():
@@ -285,19 +307,26 @@ def main():
                     
                     if connect_btn.collidepoint(mouse_pos):
                         try:
+                            print("Connecting to server...")
                             out_socket, in_socket, cmd_socket = connect_to_server(server_host, server_port)
-                            print("Connected")
+                            print("Connected to server successfully")
+                            
                             if audio_stream:
                                 stop_event.clear()
                                 audio_thread = threading.Thread(target=receive_audio_stream, 
                                                                args=(in_socket, audio_stream, stop_event))
                                 audio_thread.daemon = True
                                 audio_thread.start()
+                                print("Audio stream thread started")
+                            
                             is_connected = True
                             playlist_queue = refresh_playlist(cmd_socket)
+                            print(f"Initial playlist: {playlist_queue}")
                             current_screen = "main"
+                            
                         except Exception as e:
                             print(f"Connection error: {e}")
+                            is_connected = False
                     
                     elif quit_btn.collidepoint(mouse_pos):
                         is_running = False
@@ -315,37 +344,75 @@ def main():
                         click_index = (mouse_pos[1] - 120) // 30 + start_idx
                         if click_index < len(playlist_queue):
                             selected_queue_index = click_index
+                            print(f"Selected song: {selected_queue_index} - {playlist_queue[selected_queue_index]}")
                     
+                    # Next Song button
                     elif next_btn.collidepoint(mouse_pos) and playlist_queue:
                         if is_connected and cmd_socket:
                             try:
-                                print("Sending zmiana command")
+                                next_index = (selected_queue_index + 1) % len(playlist_queue)
+                                print(f"Requesting NEXT song: from {selected_queue_index} to {next_index}")
+                                
                                 cmd_socket.send(b"zmiana")
-                                time.sleep(0.2)
-                                cmd_socket.send(str(selected_queue_index).encode())
-                                print(f"Requested play index: {selected_queue_index}")
-                            except Exception as e:
-                                print(f"Error: {e}")
-                    
-                    elif add_btn.collidepoint(mouse_pos):
-                        available_songs = get_available_songs()
-                        available_songs = [s for s in available_songs if s + ".wav" not in playlist_queue]
-                        selected_song_index = 0
-                        current_screen = "add_songs"
-                    
-                    elif remove_btn.collidepoint(mouse_pos) and playlist_queue:
-                        if is_connected and cmd_socket:
-                            try:
-                                print(f"Removing index: {selected_queue_indSex}")
-                                cmd_socket.send(b"usun")
-                                time.sleep(0.2)
-                                cmd_socket.send(str(selected_queue_index).encode())
+                                time.sleep(0.1)
+                                cmd_socket.send(str(next_index).encode())
+                                print(f"Sent 'zmiana {next_index}' to server")
+                                
+                                # Update selection in client
+                                selected_queue_index = next_index
+                                
+                                # Refresh playlist
                                 time.sleep(0.5)
                                 playlist_queue = refresh_playlist(cmd_socket)
+                                
+                            except Exception as e:
+                                print(f"Error sending next song command: {e}")
+                    
+                    # Add Songs button
+                    elif add_btn.collidepoint(mouse_pos):
+                        print("Loading available songs...")
+                        available_songs = get_available_songs()
+                        print(f"Found {len(available_songs)} MP3 files in music folder")
+                        
+                        # Filter songs already in playlist
+                        filtered_songs = []
+                        for song in available_songs:
+                            if f"{song}.wav" not in playlist_queue:
+                                filtered_songs.append(song)
+                            else:
+                                print(f"Song already in playlist: {song}.wav")
+                        
+                        available_songs = filtered_songs
+                        selected_song_index = 0
+                        current_screen = "add_songs"
+                        print(f"Available songs for upload: {available_songs}")
+                    
+                    # Remove button
+                    elif remove_btn.collidepoint(mouse_pos) and playlist_queue:
+                        if is_connected and cmd_socket and playlist_queue:
+                            try:
+                                print(f"Removing song at index: {selected_queue_index} - {playlist_queue[selected_queue_index]}")
+                                
+                                # Send usun command
+                                cmd_socket.send(b"usun")
+                                time.sleep(0.1)
+                                cmd_socket.send(str(selected_queue_index).encode())
+                                
+                                print(f"Sent 'usun {selected_queue_index}' to server")
+                                
+                                # Wait for processing
+                                time.sleep(0.5)
+                                
+                                # Refresh playlist
+                                playlist_queue = refresh_playlist(cmd_socket)
+                                print(f"After removal: {playlist_queue}")
+                                
+                                # Adjust selection index
                                 if selected_queue_index >= len(playlist_queue):
                                     selected_queue_index = max(0, len(playlist_queue) - 1)
+                                    
                             except Exception as e:
-                                print(f"Error: {e}")
+                                print(f"Error removing song: {e}")
                 
                 elif current_screen == "add_songs":
                     start_idx = 0
@@ -359,24 +426,33 @@ def main():
                         click_index = (mouse_pos[1] - 120) // 30 + start_idx
                         if click_index < len(available_songs):
                             selected_song_index = click_index
+                            print(f"Selected for upload: {available_songs[selected_song_index]}")
                     
                     elif upload_btn.collidepoint(mouse_pos) and available_songs:
                         if is_connected and out_socket:
                             song_to_upload = available_songs[selected_song_index]
-                            print(f"Uploading: {song_to_upload}")
+                            print(f"=== STARTING UPLOAD: {song_to_upload} ===")
                             
                             def upload_task():
                                 if upload_song(song_to_upload, out_socket):
-                                    time.sleep(2)
+                                    print(f"Upload successful: {song_to_upload}")
+                                    time.sleep(2)  # Wait for server to process
                                     if cmd_socket:
                                         nonlocal playlist_queue, available_songs
+                                        # Refresh playlist
                                         playlist_queue = refresh_playlist(cmd_socket)
+                                        print(f"Updated playlist: {playlist_queue}")
+                                        
+                                        # Refresh available songs list
                                         available_songs = get_available_songs()
-                                        available_songs = [s for s in available_songs if s + ".wav" not in playlist_queue]
+                                        available_songs = [s for s in available_songs if f"{s}.wav" not in playlist_queue]
+                                        print(f"Updated available songs: {available_songs}")
+                                else:
+                                    print(f"Upload failed: {song_to_upload}")
                             
-                            thread = threading.Thread(target=upload_task)
-                            thread.daemon = True
-                            thread.start()
+                            upload_thread = threading.Thread(target=upload_task)
+                            upload_thread.daemon = True
+                            upload_thread.start()
                     
                     elif back_btn.collidepoint(mouse_pos):
                         current_screen = "main"
@@ -392,6 +468,7 @@ def main():
         title_text = title_font.render("Internet Radio", True, WHITE)
         screen.blit(title_text, (20, 15))
         
+        # Status indicator
         status_text = "Connected" if is_connected else "Disconnected"
         status_color = ACCENT_COLOR if is_connected else ERROR_COLOR
         status_surface = small_font.render(status_text, True, WHITE)
@@ -417,9 +494,10 @@ def main():
             
             if playlist_queue:
                 start_idx, _ = draw_list(screen, playlist_queue, 50, 120, 30, selected_queue_index, normal_font)
-                count_text = small_font.render(f"Songs: {len(playlist_queue)}", True, TEXT_COLOR)
+                count_text = small_font.render(f"Songs in playlist: {len(playlist_queue)}", True, TEXT_COLOR)
                 screen.blit(count_text, (50, 280))
             
+            # Control buttons
             next_disabled = not playlist_queue
             next_btn, _ = create_button(screen, 400, 170, BUTTON_WIDTH, BUTTON_HEIGHT, 
                                        "Next Song", normal_font, PRIMARY_COLOR, next_disabled)
@@ -437,6 +515,8 @@ def main():
             
             if available_songs:
                 start_idx, _ = draw_list(screen, available_songs, 50, 120, 30, selected_song_index, normal_font)
+                count_text = small_font.render(f"Available: {len(available_songs)} songs", True, TEXT_COLOR)
+                screen.blit(count_text, (50, 280))
             
             upload_disabled = not available_songs
             upload_btn, _ = create_button(screen, 400, 120, BUTTON_WIDTH, BUTTON_HEIGHT,
@@ -446,21 +526,18 @@ def main():
                                        "Back", normal_font)
 
         pygame.display.update()
-
-    print("\nCleaning up...")
     
     if stop_event:
         stop_event.set()
     
     if is_connected:
-        print("Closing connections...")
         if audio_thread:
             audio_thread.join(timeout=1)
         
         close_connection(out_socket)
         close_connection(in_socket)
         close_connection(cmd_socket)
-        print("Connections closed")
+        print("Client connections closed")
     
     if audio_stream:
         audio_stream.stop_stream()
@@ -470,7 +547,6 @@ def main():
         audio.terminate()
     
     pygame.quit()
-    print("Closed")
 
 if __name__ == "__main__":
     main()
